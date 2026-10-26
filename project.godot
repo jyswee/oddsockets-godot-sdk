@@ -1,0 +1,14 @@
+; Engine configuration. The SDK itself is the addons/oddsockets folder — this
+; project file exists so the repo opens directly in Godot and the test
+; harness can run headless.
+
+config_version=5
+
+[application]
+
+config/name="OddSockets SDK"
+config/features=PackedStringArray("4.3")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/oddsockets/plugin.cfg")
