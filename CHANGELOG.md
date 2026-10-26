@@ -17,3 +17,11 @@ Initial release.
 - Verified with a two-client live regression (tests/two_client_regression.gd):
   cross-connection delivery, presence, history, invite/reply payload
   round-trip, oversize rejection — 17/17 passing at release.
+
+## 1.0.1 — 2026-10-26
+
+- `OddSocketsClient.worker_info` — the worker assignment (`workerId`, `url`)
+  this connection landed on, for on-screen connection indicators.
+- demo/ — two-player demo scene: two live connections in one window showing
+  roster, chat, typing, the full invite/replyPayload flow and achievement
+  banners, with per-panel worker indicators.

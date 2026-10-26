@@ -30,6 +30,10 @@ const DEFAULT_MANAGER_URL := "https://connect.oddsockets.tyga.network"
 ## Checked before [signal token_requested].
 var token_provider: Callable = Callable()
 
+## Populated after discovery: `{ "workerId": String, "url": String }`. Useful
+## for on-screen connection indicators and support reports.
+var worker_info: Dictionary = {}
+
 var _config: OddSocketsConfig
 var _ws: WebSocketPeer
 var _channels: Dictionary = {}
@@ -84,6 +88,9 @@ func connect_async() -> Dictionary:
 		worker_url = str(selected.get("url", ""))
 		if worker_url.is_empty():
 			return _fail_connect("worker discovery returned no url")
+		worker_info = {"workerId": str(selected.get("workerId", "")), "url": worker_url}
+	else:
+		worker_info = {"workerId": "(pinned)", "url": worker_url}
 
 	var ws_url := worker_url.replace("https://", "wss://").replace("http://", "ws://") \
 		+ "/socket.io/?EIO=4&transport=websocket"
