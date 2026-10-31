@@ -19,6 +19,10 @@ signal request_error(event: String, message: String)
 ## Every event that is not routed to a channel, in arrival order. Game
 ## features listen here; games can too for anything not surfaced as a signal.
 signal enhanced_event(event_name: String, data: Dictionary)
+## Fired on every connect after the first (automatic or via
+## [method connect_async]), once every channel this client had subscribed is
+## subscribed again. It follows [signal connected], as in the JS SDK.
+signal reconnected
 ## Fired when a fresh auth token is needed and no token_provider is set.
 ## Answer every firing with [method provide_token].
 signal token_requested
@@ -43,6 +47,8 @@ var _intentional_close: bool = false
 var _reconnect_attempts: int = 0
 var _awaiting_token: bool = false
 var _token_refresh_at_msec: int = -1
+var _has_connected: bool = false
+var _resubscribing: bool = false
 
 enum { STATE_IDLE, STATE_CONNECTING, STATE_CONNECTED }
 
@@ -61,14 +67,15 @@ func initialize(config: OddSocketsConfig) -> void:
 ## success or `{ "error": String }` — the same outcome also arrives on the
 ## [signal connected] / [signal connection_error] signals.
 func connect_async() -> Dictionary:
-	if _config == null or _config.user_id.is_empty():
-		var msg := "initialize() with a user_id before connect_async()"
+	if _config == null:
+		var msg := "initialize() before connect_async()"
 		connection_error.emit(msg)
 		return {"error": msg}
 	if _state != STATE_IDLE:
 		return {"error": "already connecting or connected"}
 	_intentional_close = false
 	_state = STATE_CONNECTING
+	await _drain_old_socket()
 
 	# Token-auth clients fetch a fresh token before every (re)connect so a
 	# reconnect after expiry never presents a dead token.
@@ -103,7 +110,7 @@ func connect_async() -> Dictionary:
 	# resolves either way so callers can simply `await client.connect_async()`.
 	var deadline := Time.get_ticks_msec() + int(_config.request_timeout_seconds * 1000.0)
 	while _state == STATE_CONNECTING:
-		if Time.get_ticks_msec() > deadline:
+		if Time.get_ticks_msec() > deadline and not _resubscribing:
 			_teardown_socket()
 			return _fail_connect("timeout during connection handshake")
 		await get_tree().process_frame
@@ -147,6 +154,14 @@ func provide_token(fresh_token: Dictionary) -> void:
 	_config.token = fresh_token
 	_schedule_token_refresh()
 	_awaiting_token = false
+
+
+## Adds `userId` to [param payload] when the config sets one. Without it the
+## server takes the identity from the API key or the token's subject.
+func with_user_id(payload: Dictionary) -> Dictionary:
+	if _config != null and not _config.user_id.is_empty():
+		payload["userId"] = _config.user_id
+	return payload
 
 
 ## Send an event and await its response event (or a platform error for the
@@ -209,7 +224,7 @@ func _handle_frame(frame: String) -> void:
 		_ws.send_text("3")
 		return
 	if frame.begins_with("0"):
-		var auth := {"userId": _config.user_id}
+		var auth := with_user_id({})
 		if not _config.api_key.is_empty():
 			auth["apiKey"] = _config.api_key
 		else:
@@ -223,10 +238,14 @@ func _handle_frame(frame: String) -> void:
 		connection_error.emit("authentication refused: %s" % detail)
 		return
 	if frame.begins_with("40"):
-		_state = STATE_CONNECTED
 		_reconnect_attempts = 0
 		_schedule_token_refresh()
-		connected.emit()
+		if _has_connected:
+			_finish_reconnect()
+		else:
+			_has_connected = true
+			_state = STATE_CONNECTED
+			connected.emit()
 		return
 	if not frame.begins_with("42"):
 		return
@@ -275,14 +294,16 @@ func _select_worker() -> Dictionary:
 	var manager := _config.manager_url if not _config.manager_url.is_empty() else DEFAULT_MANAGER_URL
 	var ident := _config.client_identifier
 	if ident.is_empty():
-		ident = "godot-%s" % _config.user_id
+		ident = "godot-%s" % (_config.user_id if not _config.user_id.is_empty() else "default")
 	var auth_param: String
 	if not _config.api_key.is_empty():
 		auth_param = "apiKey=%s" % _config.api_key.uri_encode()
 	else:
 		auth_param = "token=%s" % str(_config.token.get("token", "")).uri_encode()
 	var url := "%s/api/cluster/select-worker?%s&userId=%s&clientIdentifier=%s" % [
-		manager, auth_param, _config.user_id.uri_encode(), ident.uri_encode()]
+		manager, auth_param,
+		(_config.user_id if not _config.user_id.is_empty() else ident).uri_encode(),
+		ident.uri_encode()]
 
 	var http := HTTPRequest.new()
 	add_child(http)
@@ -360,10 +381,42 @@ func _attempt_reconnect() -> void:
 	if _intentional_close or _state != STATE_IDLE:
 		return
 	var result := await connect_async()
-	if not result.has("error"):
-		# Restore the channels the game had subscribed before the drop.
-		for ch in _channels.values():
-			(ch as OddSocketsChannel)._resubscribe_if_needed()
+	if result.has("error") and not _intentional_close and _state == STATE_IDLE:
+		_attempt_reconnect()
+
+
+# Restore every channel the game had subscribed before the drop, then report
+# the connection. Games see [signal connected] only once their channels are
+# live again, the same order as the JS SDK.
+func _finish_reconnect() -> void:
+	_resubscribing = true
+	for ch in _channels.values():
+		var result: Dictionary = await (ch as OddSocketsChannel)._resubscribe_async()
+		if result.has("error"):
+			request_error.emit("subscribe", "resubscribe %s failed: %s" % [
+				(ch as OddSocketsChannel).channel_name, str(result["error"])])
+	_resubscribing = false
+	if _ws == null or _ws.get_ready_state() != WebSocketPeer.STATE_OPEN:
+		return
+	_state = STATE_CONNECTED
+	connected.emit()
+	reconnected.emit()
+
+
+# A closed WebSocketPeer only sends its close frame when polled. Finish the
+# previous socket's close before opening a new one, or the server still sees
+# the old session when the new one authenticates and drops the new one.
+func _drain_old_socket() -> void:
+	if _ws == null:
+		return
+	var old := _ws
+	_ws = null
+	if old.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		old.close()
+	var until := Time.get_ticks_msec() + 3000
+	while old.get_ready_state() != WebSocketPeer.STATE_CLOSED and Time.get_ticks_msec() < until:
+		old.poll()
+		await get_tree().process_frame
 
 
 func _fail_connect(message: String) -> Dictionary:

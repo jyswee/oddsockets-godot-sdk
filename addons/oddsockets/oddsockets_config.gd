@@ -10,7 +10,8 @@ extends RefCounted
 ## API key authentication. Leave empty for token-based auth.
 var api_key: String = ""
 
-## Stable user id this connection represents (required).
+## User id this connection represents. Optional: leave empty on the token lane
+## (identity comes from the token) or to use the API key's own user.
 var user_id: String = ""
 
 ## Token auth: `{ "token": String, "expires_at": String }` where expires_at is

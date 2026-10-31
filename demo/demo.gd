@@ -186,7 +186,7 @@ class PlayerPanel:
 
 	# ── inbound (all of this arrived over the wire) ──
 	func _on_message(envelope: Dictionary) -> void:
-		var body: Variant = JSON.parse_string(str(envelope.get("message", "")))
+		var body: Variant = envelope.get("message")
 		var text := str(body.get("text", envelope.get("message"))) if typeof(body) == TYPE_DICTIONARY else str(envelope.get("message"))
 		var who := str(envelope.get("publisher", "?"))
 		_log("[b]%s[/b]: %s" % [who, text])

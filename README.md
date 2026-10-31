@@ -19,19 +19,30 @@ add_child(client)  # the client polls its connection every frame
 
 var config := OddSocketsConfig.new()
 config.api_key = "YOUR_API_KEY"
-config.user_id = "player-123"
+config.user_id = "player-123"  # optional: defaults to the API key's user
 client.initialize(config)
 await client.connect_async()
 
 var channel := client.get_channel("my-channel")
 channel.message_received.connect(_on_message)
-channel.presence_changed.connect(_on_roster_changed)  # joins/leaves
-await channel.subscribe_async({"enable_presence": true, "retain_history": true})
+channel.presence_received.connect(_on_roster)  # full roster, after every join/leave
+await channel.subscribe_async({"enable_presence": true})  # history kept by default (100)
 
-await channel.publish_async({"move": "e4"})  # dictionaries are JSON-encoded
+await channel.publish_async({"move": "e4"})  # arrives as a Dictionary for every SDK
 ```
 
-Presence and history are queries, not pushes:
+`presence_received` carries `{ channel, occupancy, occupants }`: the snapshot at
+subscribe, then the whole updated roster after every join or leave.
+`presence_changed` still gives the single join/leave event, and
+`channel.get_occupants()` returns the current roster at any time.
+
+Subscribe options match the JS SDK: `retain_history` defaults to `true`,
+`max_history` to `100`, `enable_presence` to `false`.
+
+After an unexpected drop the client reconnects, re-subscribes every channel,
+then emits `connected` followed by `reconnected`.
+
+Queries:
 
 ```gdscript
 var presence := await channel.get_presence_async()   # { occupancy, occupants }
@@ -101,7 +112,7 @@ before the token expires:
 
 ```gdscript
 var config := OddSocketsConfig.new()
-config.user_id = "player-123"   # no api_key: token auth
+# no api_key and no user_id: the player's identity comes from the token
 client.initialize(config)
 
 client.token_provider = func() -> Dictionary:
